@@ -1,11 +1,35 @@
 // Using a hash map and vectors, create a text interface to allow a user to add employee names to a department in a company. For example, “Add Sally to Engineering” or “Add Amir to Sales.” Then let the user retrieve a list of all people in a department or all people in the company by department, sorted alphabetically.
 
-use regex::{Captures, Regex, RegexSet};
+use regex::{Regex, RegexSet};
 use std::collections::HashMap;
+use std::fmt::Display;
+use std::io::{self, Write};
 
-#[derive(Debug)]
+struct Department {
+    employees: Vec<String>,
+}
+
+impl Display for Department {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for employee_name in self.employees.iter() {
+            writeln!(f, "{employee_name}")?;
+        }
+        Ok(())
+    }
+}
+
 struct EmployeeDB {
-    db: HashMap<String, Vec<String>>,
+    db: HashMap<String, Department>,
+}
+
+impl Display for EmployeeDB {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (department_name, department) in self.db.iter() {
+            writeln!(f, "{department_name}:")?;
+            write!(f, "{department}")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -18,7 +42,6 @@ enum EmployeeDBAction {
         department_name: String,
     },
     ListAll,
-    Nothing,
 }
 
 impl EmployeeDB {
@@ -32,17 +55,27 @@ impl EmployeeDB {
             // The department already exists
             Some(department) => {
                 // Find insertion point
-                let insertion_index = department.partition_point(|existing_employee_name| {
-                    existing_employee_name < &new_employee_name
-                });
+                let insertion_index =
+                    department
+                        .employees
+                        .partition_point(|existing_employee_name| {
+                            existing_employee_name < &new_employee_name
+                        });
 
                 // Insert name in order
-                department.insert(insertion_index, new_employee_name)
+                department
+                    .employees
+                    .insert(insertion_index, new_employee_name)
             }
             // Department does not exist
             None => {
                 // Create new department and add employee to it
-                self.db.insert(department_name, [new_employee_name].into());
+                self.db.insert(
+                    department_name,
+                    Department {
+                        employees: [new_employee_name].into(),
+                    },
+                );
             }
         };
     }
@@ -50,7 +83,7 @@ impl EmployeeDB {
     // Retrieval functions
 
     fn send(&mut self, action: EmployeeDBAction) {
-        use EmployeeDBAction::{InsertEmployee, ListAll, ListDepartment, Nothing};
+        use EmployeeDBAction::{InsertEmployee, ListAll, ListDepartment};
 
         match action {
             InsertEmployee {
@@ -58,99 +91,115 @@ impl EmployeeDB {
                 department_name,
             } => self.insert_employee(department_name, new_employee_name),
 
-            ListAll => {
-                println!("{:#?}", self.db)
-            }
+            ListAll => println!("{}", self),
 
             ListDepartment { department_name } => {
-                println!("{:#?}", self.db[&department_name])
+                if let Some(department) = self.db.get(&department_name) {
+                    println!("{}", department);
+                } else {
+                    println!("no department by that name");
+                }
             }
-
-            Nothing => {}
         }
     }
 }
 
-struct InputParser {
+struct InputParser<'a> {
+    capture_names: Vec<&'a str>,
     set: RegexSet,
-
     regexes: Vec<Regex>,
 }
 
-impl InputParser {
+impl<'a> InputParser<'a> {
     fn new() -> Self {
+        let capture_names = vec!["add_employee", "show_department", "show_all"];
+
         let set = RegexSet::new(&[
-            r"^(?P<add_employee>add (?P<employee_name>\w+) to (?P<department_name>\w+))$",
-            r"^(?P<show_department>show (?P<department_name>\w+))$",
-            r"^(?P<show_all>show)$",
+            r"(?P<add_employee>add (?P<employee_name>\w+) to (?P<department_name>\w+))",
+            r"^(?P<show_department>show (?P<department_name>\w+))",
+            r"^(?P<show_all>show)",
         ])
-        .unwrap();
+        .expect("Hardcoded regex should always compile");
 
         // Compile each pattern independently.
         let regexes = set
             .patterns()
             .iter()
-            .map(|pat| Regex::new(pat).unwrap())
+            .map(|pat| Regex::new(pat).expect("Hardcoded regex that has already been compiled once should /definitely/ always compile"))
             .collect();
 
-        InputParser { set, regexes }
+        InputParser {
+            set,
+            regexes,
+            capture_names,
+        }
     }
 
     // Text processing function
-    fn parse(&self, input: &str) -> EmployeeDBAction {
-        let captures = &(self
+    fn parse(&self, input: &str) -> Option<EmployeeDBAction> {
+        let captures = self
             // Match against the whole set first and identify the individual matching patterns.
             .set
             .matches(input)
             .into_iter()
-            // Dereference the match index to get the corresponding
-            // compiled pattern.
+            // Dereference the match index to get the corresponding compiled pattern.
             .map(|match_index| &self.regexes[match_index])
             // To get match locations or any other info, we then have to search the exact same text again, using our separately-compiled pattern.
-            .map(|pattern| pattern.captures(input).unwrap())
-            .collect::<Vec<Captures>>())[0];
+            .map(|pattern| {
+                pattern
+                    .captures(input)
+                    .expect("If a pattern has matched already, it must also capture")
+            })
+            // pull out the first match
+            // there really shouldn't be more than one anyway, but we still have to do this
+            // Question mark because we want to abort if nothing matched
+            .next()?;
 
-        let actions = vec!["add_employee", "show_department", "show_all"];
-
-        let action = actions.iter().find(|x| captures.name(x).is_some()).unwrap();
+        let action = self
+            .capture_names
+            .iter()
+            .find(|x| captures.name(x).is_some())
+            .unwrap();
 
         match *action {
-            "add_employee" => EmployeeDBAction::InsertEmployee {
+            "add_employee" => Some(EmployeeDBAction::InsertEmployee {
                 new_employee_name: captures["employee_name"].to_owned(),
                 department_name: captures["department_name"].to_owned(),
-            },
-            "show_department" => EmployeeDBAction::ListDepartment {
+            }),
+            "show_department" => Some(EmployeeDBAction::ListDepartment {
                 department_name: captures["department_name"].to_owned(),
-            },
-            "show_all" => EmployeeDBAction::ListAll,
-            _ => EmployeeDBAction::Nothing,
+            }),
+            "show_all" => Some(EmployeeDBAction::ListAll),
+            _ => None,
         }
     }
 }
 
-fn main() {
+fn main() -> io::Result<()> {
     // Database hashmap
     let mut employee_db = EmployeeDB::new();
 
     let input_parser = InputParser::new();
 
-    let commands = vec![
-        "add jason to sales",
-        // "show sales",
-        "show"
-    ];
+    let stdin = io::stdin();
 
-    for command in commands {
-        employee_db.send(input_parser.parse(command))
+    loop {
+        // prompt
+        print!("EDB:> ");
+
+        io::stdout().flush()?;
+
+        // take input
+        let mut input = String::new();
+        match stdin.read_line(&mut input) {
+            Ok(_) => {
+                if let Some(command) = input_parser.parse(&input) {
+                    employee_db.send(command);
+                } else {
+                    println!("invalid command!")
+                }
+            }
+            Err(error) => println!("error: {error}"),
+        }
     }
-
-    println!("{employee_db:#?}");
-    // loop {
-    //     // take input
-    //     // process input
-    //     // determine intent
-    //     // extract meaning
-    //     // perform operations
-    //     // return result
-    // }
 }
